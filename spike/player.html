@@ -252,6 +252,7 @@
   <div class="brand"><span class="dot"></span>Audify</div>
   <button class="ghost" id="pastebtn">Paste text</button>
   <button class="ghost" id="openpdf">Open PDF</button>
+  <button class="ghost" id="exportbtn" style="display:none">Save audio</button>
   <input type="file" id="pdffile" accept="application/pdf" hidden>
 </nav>
 
@@ -330,6 +331,7 @@ function setDocument(blocks) {
   $('empty').style.display = 'none';
   renderDocument();
   $('player').classList.add('visible');
+  $('exportbtn').style.display = '';
 }
 
 function renderDocument() {
@@ -595,6 +597,35 @@ async function loadPdf(file) {
   $('stats').classList.remove('busy');
   $('pdffile').value = '';
 }
+
+// export whole document as .m4a into ~/Downloads
+$('exportbtn').onclick = async () => {
+  if (!joined) return;
+  const title = (docBlocks.find(b => b.type === 'title') || docBlocks[0]).text.slice(0, 60);
+  const stats = $('stats');
+  await fetch('/export', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ text: joined, speed: parseFloat($('speed').value), filename: title }),
+  });
+  $('exportbtn').disabled = true;
+  stats.classList.add('busy');
+  const poll = setInterval(async () => {
+    try {
+      const s = await (await fetch('/export/status')).json();
+      if (s.status === 'running') {
+        stats.textContent = `preparing audio file… ${Math.round(s.progress * 100)}%`;
+      } else {
+        clearInterval(poll);
+        $('exportbtn').disabled = false;
+        stats.classList.remove('busy');
+        stats.textContent = s.status === 'done'
+          ? `saved to ${s.path.replace(/^.*\/(Downloads\/)/, '$1')} — AirDrop it to your phone from the Finder window`
+          : `export failed: ${s.error}`;
+      }
+    } catch (e) { /* engine briefly busy; keep polling */ }
+  }, 1500);
+};
 
 // drag & drop anywhere
 let dragDepth = 0;

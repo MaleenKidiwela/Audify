@@ -16,7 +16,12 @@ Run:  .venv/bin/python spike/streaming_server.py   then open http://127.0.0.1:87
 
 import base64
 import json
+import re
+import subprocess
+import tempfile
+import threading
 import time
+import wave
 from pathlib import Path
 
 import numpy as np
@@ -79,6 +84,73 @@ def index():
         Path(__file__).parent / "player.html",
         headers={"Cache-Control": "no-store"},
     )
+
+
+# ---- audio export (save .m4a to ~/Downloads for AirDrop etc.) ----
+EXPORT = {"status": "idle", "progress": 0.0, "path": None, "error": None}
+_export_lock = threading.Lock()
+
+
+class ExportRequest(BaseModel):
+    text: str
+    speed: float = 1.0
+    filename: str = "audify-audio"
+
+
+def _run_export(req: ExportRequest):
+    try:
+        spoken, _, _ = normalize(req.text)
+        total = max(len(spoken), 1)
+        done = 0
+        chunks = []
+        for result in pipeline(
+            spoken, voice=VOICE, speed=req.speed, split_pattern=SPLIT_PATTERN
+        ):
+            chunks.append(np.asarray(result.audio).squeeze())
+            done += len(result.graphemes)
+            EXPORT["progress"] = min(done / total, 0.99)
+        audio = np.concatenate(chunks)
+        pcm16 = (np.clip(audio, -1.0, 1.0) * 32767).astype(np.int16)
+
+        safe = re.sub(r"[^\w\s-]", "", req.filename).strip()[:60] or "audify-audio"
+        out = Path.home() / "Downloads" / f"{safe}.m4a"
+        i = 1
+        while out.exists():
+            out = Path.home() / "Downloads" / f"{safe} {i}.m4a"
+            i += 1
+
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+            with wave.open(tmp.name, "wb") as w:
+                w.setnchannels(1)
+                w.setsampwidth(2)
+                w.setframerate(SAMPLE_RATE)
+                w.writeframes(pcm16.tobytes())
+            subprocess.run(
+                ["afconvert", "-f", "m4af", "-d", "aac", "-b", "64000",
+                 tmp.name, str(out)],
+                check=True, capture_output=True,
+            )
+            Path(tmp.name).unlink(missing_ok=True)
+
+        EXPORT.update(status="done", progress=1.0, path=str(out))
+        subprocess.run(["open", "-R", str(out)])  # reveal in Finder for AirDrop
+    except Exception as e:  # surface any failure to the UI
+        EXPORT.update(status="error", error=str(e))
+
+
+@app.post("/export")
+def export(req: ExportRequest):
+    with _export_lock:
+        if EXPORT["status"] == "running":
+            return {"status": "running"}
+        EXPORT.update(status="running", progress=0.0, path=None, error=None)
+    threading.Thread(target=_run_export, args=(req,), daemon=True).start()
+    return {"status": "started"}
+
+
+@app.get("/export/status")
+def export_status():
+    return EXPORT
 
 
 @app.post("/extract")
