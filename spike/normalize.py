@@ -115,6 +115,11 @@ RULES = [
     (re.compile(r"(?:\b(\d+(?:\.\d+)?)\s*[x×·*]\s*)?\b10([⁻⁺]?[⁰¹²³⁴⁵⁶⁷⁸⁹]+)"), _pow_ten),
     # x^2, mc^2, r^3
     (re.compile(r"\b([A-Za-z]+)\s*\^\s*(\d+)\b"), _power),
+    # ranges: 30-60 km -> "30 to 60 kilometers", 5–10 -> "5 to 10"
+    (re.compile(rf"\b(\d+(?:\.\d+)?)\s*[-–—]\s*(\d+(?:\.\d+)?)\s*({_UNIT_ALT})(?![A-Za-z])"),
+     lambda m: f"{m.group(1)} to {m.group(2)} {_plural(UNITS[m.group(3)], m.group(2))}"),
+    (re.compile(r"\b(\d+(?:\.\d+)?)\s*[-–—]\s*(\d+(?:\.\d+)?)\b"),
+     lambda m: f"{m.group(1)} to {m.group(2)}"),
     # 3 m/s, 9.8 m/s
     (re.compile(rf"\b(\d+(?:\.\d+)?)\s*({_UNIT_ALT})/({_UNIT_ALT})\b"), _unit_slash),
     # bare m/s (e.g. after a power-of-ten expression that consumed the number)
