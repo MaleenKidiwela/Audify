@@ -201,6 +201,15 @@
     -webkit-appearance: none; appearance: none;
     padding: 4px 2px;
   }
+  select#voice.ghost {
+    -webkit-appearance: none; appearance: none;
+    max-width: 190px; text-overflow: ellipsis;
+    font-size: 0.88rem; font-weight: 500; color: var(--ink-soft);
+    background: none; border: 1px solid var(--line); border-radius: 99px;
+    padding: 7px 16px; cursor: pointer; outline: none;
+    transition: border-color 0.2s, color 0.2s, background 0.2s;
+  }
+  select#voice.ghost:hover { border-color: var(--accent); color: var(--accent-ink); background: var(--accent-soft); }
 
   .switch { display: flex; align-items: center; gap: 6px; cursor: pointer; user-select: none; }
   .switch input { display: none; }
@@ -250,6 +259,7 @@
 
 <nav>
   <div class="brand"><span class="dot"></span>Audify</div>
+  <select id="voice" class="ghost" title="Voice"></select>
   <button class="ghost" id="pastebtn">Paste text</button>
   <button class="ghost" id="openpdf">Open PDF</button>
   <button class="ghost" id="exportbtn" style="display:none">Save audio</button>
@@ -506,6 +516,7 @@ async function play(fromOffset = 0) {
       text: joined,
       start: fromOffset,
       speed: parseFloat($('speed').value),
+      voice: $('voice').value || undefined,
     }),
     signal: abortCtl.signal,
   });
@@ -558,11 +569,31 @@ $('playpause').onclick = () => {
   else { ctx.resume(); setPlayIcon(false); }
 };
 
-$('speed').onchange = () => {
+function restartAtCurrentWord() {
   if (!ctx) return;
-  // restart from the current word at the new speed
   const i = markIndexAtTime(lastPlayedMs);
   play(i >= 0 ? marks[i].start : 0).catch(handleErr);
+}
+$('speed').onchange = restartAtCurrentWord;
+
+// voice picker: populated from the engine, persisted, hot-switches mid-read
+(async () => {
+  try {
+    const d = await (await fetch('/voices')).json();
+    const saved = localStorage.getItem('audify-voice');
+    for (const v of d.voices) {
+      const o = document.createElement('option');
+      o.value = v.id;
+      o.textContent = v.label;
+      $('voice').appendChild(o);
+    }
+    $('voice').value = d.voices.some(v => v.id === saved) ? saved : d.default;
+  } catch (e) { $('voice').style.display = 'none'; }
+})();
+$('voice').onchange = () => {
+  localStorage.setItem('audify-voice', $('voice').value);
+  $('stats').textContent = 'switching voice — new voices download once (needs internet)';
+  restartAtCurrentWord();
 };
 
 // ---- input sources ----
@@ -606,7 +637,7 @@ $('exportbtn').onclick = async () => {
   await fetch('/export', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ text: joined, speed: parseFloat($('speed').value), filename: title }),
+    body: JSON.stringify({ text: joined, speed: parseFloat($('speed').value), filename: title, voice: $('voice').value || undefined }),
   });
   $('exportbtn').disabled = true;
   stats.classList.add('busy');

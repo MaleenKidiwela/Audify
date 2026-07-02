@@ -53,10 +53,37 @@ SAMPLE_RATE = 24000
 # Split into sentence-sized chunks so the first audio arrives fast.
 SPLIT_PATTERN = r"(?<=[.!?;:])\s+|\n+"
 
+# curated Kokoro presets; new voices download once (~500 KB) on first use
+VOICES = {
+    "af_heart": "Heart · US female",
+    "af_bella": "Bella · US female",
+    "af_nicole": "Nicole · US female (soft)",
+    "af_sky": "Sky · US female",
+    "am_adam": "Adam · US male",
+    "am_michael": "Michael · US male",
+    "am_puck": "Puck · US male",
+    "bf_emma": "Emma · UK female",
+    "bf_isabella": "Isabella · UK female",
+    "bm_george": "George · UK male",
+    "bm_fable": "Fable · UK male",
+    "bm_lewis": "Lewis · UK male",
+}
+
 print(f"Loading {REPO_ID} ...")
 t0 = time.perf_counter()
 model = load_model(REPO_ID)
-pipeline = KokoroPipeline(lang_code="a", model=model, repo_id=REPO_ID)
+# one pipeline per accent: 'a' (US) and 'b' (UK) differ in G2P
+_pipelines: dict[str, KokoroPipeline] = {}
+
+
+def get_pipeline(voice: str) -> KokoroPipeline:
+    lang = voice[0] if voice[:1] in ("a", "b") else "a"
+    if lang not in _pipelines:
+        _pipelines[lang] = KokoroPipeline(lang_code=lang, model=model, repo_id=REPO_ID)
+    return _pipelines[lang]
+
+
+pipeline = get_pipeline(VOICE)
 print(f"Model ready in {time.perf_counter() - t0:.1f}s")
 
 app = FastAPI()
@@ -74,6 +101,13 @@ class TTSRequest(BaseModel):
     text: str
     speed: float = 1.0
     start: int = 0  # char offset to begin reading from (click-to-seek)
+    voice: str = VOICE
+
+
+@app.get("/voices")
+def voices():
+    return {"voices": [{"id": k, "label": v} for k, v in VOICES.items()],
+            "default": VOICE}
 
 
 @app.get("/")
@@ -95,16 +129,19 @@ class ExportRequest(BaseModel):
     text: str
     speed: float = 1.0
     filename: str = "audify-audio"
+    voice: str = VOICE
 
 
 def _run_export(req: ExportRequest):
     try:
+        voice = req.voice if req.voice in VOICES else VOICE
+        pipe = get_pipeline(voice)
         spoken, _, _ = normalize(req.text)
         total = max(len(spoken), 1)
         done = 0
         chunks = []
-        for result in pipeline(
-            spoken, voice=VOICE, speed=req.speed, split_pattern=SPLIT_PATTERN
+        for result in pipe(
+            spoken, voice=voice, speed=req.speed, split_pattern=SPLIT_PATTERN
         ):
             chunks.append(np.asarray(result.audio).squeeze())
             done += len(result.graphemes)
@@ -166,6 +203,8 @@ async def extract_pdf(request: Request):
 
 @app.post("/tts")
 def tts(req: TTSRequest):
+    voice = req.voice if req.voice in VOICES else VOICE
+    pipe = get_pipeline(voice)
     base = max(0, min(req.start, len(req.text)))
     text = req.text[base:]
 
@@ -177,8 +216,8 @@ def tts(req: TTSRequest):
         char_cursor = 0
         elapsed = 0.0  # seconds of audio emitted so far
         t_start = time.perf_counter()
-        for result in pipeline(
-            spoken, voice=VOICE, speed=req.speed, split_pattern=SPLIT_PATTERN
+        for result in pipe(
+            spoken, voice=voice, speed=req.speed, split_pattern=SPLIT_PATTERN
         ):
             audio = np.asarray(result.audio).squeeze()
             marks = []
