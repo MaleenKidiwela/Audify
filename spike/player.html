@@ -614,10 +614,13 @@ $('exportbtn').onclick = async () => {
     try {
       const s = await (await fetch('/export/status')).json();
       if (s.status === 'running') {
-        stats.textContent = `preparing audio file… ${Math.round(s.progress * 100)}%`;
+        const pct = Math.round(s.progress * 100);
+        $('exportbtn').textContent = `Saving… ${pct}%`;
+        stats.textContent = `preparing audio file… ${pct}% — it will land in Downloads and open in Finder`;
       } else {
         clearInterval(poll);
         $('exportbtn').disabled = false;
+        $('exportbtn').textContent = 'Save audio';
         stats.classList.remove('busy');
         stats.textContent = s.status === 'done'
           ? `saved to ${s.path.replace(/^.*\/(Downloads\/)/, '$1')} — AirDrop it to your phone from the Finder window`
