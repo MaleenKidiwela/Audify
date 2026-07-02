@@ -1,0 +1,618 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Audify</title>
+<style>
+  :root {
+    --paper: #faf5ec;
+    --paper-deep: #f3ecdd;
+    --ink: #221c13;
+    --ink-soft: #5c5344;
+    --muted: #998c78;
+    --accent: #e69b1e;
+    --accent-ink: #7a4d05;
+    --accent-soft: #f7dfae;
+    --line: #e4dac6;
+    --capsule: rgba(255, 252, 245, 0.88);
+    --shadow: 0 12px 40px rgba(60, 42, 10, 0.18), 0 2px 8px rgba(60, 42, 10, 0.08);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --paper: #191512;
+      --paper-deep: #14100d;
+      --ink: #eae2d3;
+      --ink-soft: #b3a893;
+      --muted: #7d7160;
+      --accent: #f0ad35;
+      --accent-ink: #ffd98a;
+      --accent-soft: #4a3813;
+      --line: #2e2820;
+      --capsule: rgba(30, 25, 20, 0.88);
+      --shadow: 0 12px 40px rgba(0, 0, 0, 0.5), 0 2px 8px rgba(0, 0, 0, 0.4);
+    }
+  }
+
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    background:
+      radial-gradient(1200px 600px at 50% -200px, var(--paper) 0%, var(--paper-deep) 100%);
+    color: var(--ink);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    display: flex; flex-direction: column;
+  }
+
+  /* ---------- top bar ---------- */
+  nav {
+    display: flex; align-items: center; gap: 10px;
+    padding: 14px 22px;
+    animation: settle 0.5s ease both;
+  }
+  .brand {
+    font-family: ui-serif, "New York", Georgia, serif;
+    font-weight: 700; font-size: 1.35rem; letter-spacing: 0.01em;
+    margin-right: auto;
+    display: flex; align-items: center; gap: 9px;
+  }
+  .brand .dot {
+    width: 9px; height: 9px; border-radius: 50%;
+    background: var(--accent);
+    box-shadow: 0 0 0 4px var(--accent-soft);
+  }
+  .ghost {
+    font: inherit; font-size: 0.88rem; font-weight: 500;
+    color: var(--ink-soft);
+    background: none; border: 1px solid var(--line); border-radius: 99px;
+    padding: 7px 16px; cursor: pointer;
+    transition: border-color 0.2s, color 0.2s, background 0.2s;
+  }
+  .ghost:hover { border-color: var(--accent); color: var(--accent-ink); background: var(--accent-soft); }
+
+  /* ---------- paste panel ---------- */
+  #pastepanel {
+    max-width: 720px; width: calc(100% - 44px);
+    margin: 0 auto;
+    overflow: hidden; max-height: 0; opacity: 0;
+    transition: max-height 0.35s ease, opacity 0.3s ease, margin 0.35s ease;
+  }
+  #pastepanel.open { max-height: 220px; opacity: 1; margin-bottom: 10px; }
+  textarea {
+    width: 100%; height: 130px; resize: none;
+    font: 0.95rem/1.5 ui-serif, "New York", Georgia, serif;
+    color: var(--ink); background: var(--capsule);
+    border: 1px solid var(--line); border-radius: 14px;
+    padding: 14px 16px; outline: none;
+  }
+  textarea:focus { border-color: var(--accent); }
+  #pastego { margin-top: 8px; }
+
+  /* ---------- document ---------- */
+  main {
+    flex: 1; overflow-y: auto; scroll-behavior: smooth;
+    padding: 10px 22px 150px;
+  }
+  #reader {
+    max-width: 680px; margin: 0 auto;
+    font-family: ui-serif, "New York", Georgia, serif;
+    font-size: 1.14rem; line-height: 1.75;
+    color: var(--ink);
+  }
+  #reader h1 {
+    font-size: 1.9rem; line-height: 1.25; font-weight: 700;
+    letter-spacing: -0.01em; margin: 30px 0 10px;
+  }
+  #reader h2 {
+    font-size: 1.02rem; font-weight: 700;
+    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+    letter-spacing: 0.09em; text-transform: uppercase;
+    color: var(--ink-soft);
+    margin: 40px 0 6px;
+    padding-top: 18px; border-top: 1px solid var(--line);
+  }
+  #reader p { margin: 14px 0; }
+  #reader span.word {
+    border-radius: 5px; padding: 1px 2px; margin: -1px -2px;
+    cursor: pointer;
+    transition: background 0.12s ease, color 0.12s ease;
+  }
+  #reader span.word:hover { background: var(--accent-soft); }
+  #reader span.word.active {
+    background: var(--accent); color: #241a05;
+    box-shadow: 0 1px 6px rgba(230, 155, 30, 0.45);
+  }
+
+  /* ---------- empty state ---------- */
+  #empty {
+    max-width: 500px; margin: 9vh auto 0; text-align: center;
+    animation: settle 0.6s 0.1s ease both;
+  }
+  #empty .glyph {
+    font-family: ui-serif, "New York", Georgia, serif;
+    font-size: 4.4rem; line-height: 1; color: var(--accent);
+    text-shadow: 0 10px 30px rgba(230, 155, 30, 0.35);
+    margin-bottom: 6px; user-select: none;
+  }
+  #empty h2 {
+    font-family: ui-serif, "New York", Georgia, serif;
+    font-size: 1.7rem; font-weight: 700; margin: 8px 0 6px;
+  }
+  #empty p { color: var(--ink-soft); font-size: 0.98rem; margin: 4px 0 22px; }
+  .primary {
+    font: inherit; font-size: 0.95rem; font-weight: 600;
+    background: var(--ink); color: var(--paper);
+    border: none; border-radius: 99px; padding: 12px 28px; cursor: pointer;
+    transition: transform 0.15s ease, box-shadow 0.15s ease;
+    box-shadow: 0 6px 18px rgba(34, 28, 19, 0.25);
+  }
+  .primary:hover { transform: translateY(-1px); box-shadow: 0 10px 24px rgba(34, 28, 19, 0.3); }
+  .primary:active { transform: translateY(0); }
+
+  /* ---------- player capsule ---------- */
+  #player {
+    position: fixed; left: 50%; bottom: 22px;
+    transform: translate(-50%, 90px);
+    display: flex; align-items: center; gap: 14px;
+    background: var(--capsule);
+    -webkit-backdrop-filter: blur(20px) saturate(1.4);
+    backdrop-filter: blur(20px) saturate(1.4);
+    border: 1px solid var(--line);
+    border-radius: 99px;
+    padding: 10px 20px 10px 12px;
+    box-shadow: var(--shadow);
+    transition: transform 0.45s cubic-bezier(0.2, 0.9, 0.3, 1.1);
+    z-index: 10;
+  }
+  #player.visible { transform: translate(-50%, 0); }
+
+  #playpause {
+    width: 46px; height: 46px; border-radius: 50%;
+    border: none; cursor: pointer;
+    background: var(--accent); color: #241a05;
+    display: grid; place-items: center;
+    transition: transform 0.15s ease;
+    flex: none;
+  }
+  #playpause:hover { transform: scale(1.06); }
+  #playpause svg { width: 18px; height: 18px; fill: currentColor; }
+
+  .meter { min-width: 168px; }
+  #progress {
+    height: 3px; border-radius: 2px; background: var(--line);
+    position: relative; overflow: hidden; margin-bottom: 7px;
+  }
+  #progress .buffered, #progress .played {
+    position: absolute; inset: 0 auto 0 0; border-radius: 2px; width: 0;
+  }
+  #progress .buffered { background: var(--accent-soft); }
+  #progress .played { background: var(--accent); }
+  #timeline {
+    display: flex; justify-content: space-between;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 0.7rem; color: var(--muted);
+  }
+
+  select {
+    font: inherit; font-size: 0.82rem; font-weight: 600;
+    color: var(--ink-soft); background: none;
+    border: none; cursor: pointer; outline: none;
+    -webkit-appearance: none; appearance: none;
+    padding: 4px 2px;
+  }
+
+  .switch { display: flex; align-items: center; gap: 6px; cursor: pointer; user-select: none; }
+  .switch input { display: none; }
+  .switch .track {
+    width: 30px; height: 18px; border-radius: 99px;
+    background: var(--line); position: relative;
+    transition: background 0.2s;
+  }
+  .switch .track::after {
+    content: ""; position: absolute; top: 2px; left: 2px;
+    width: 14px; height: 14px; border-radius: 50%;
+    background: var(--paper); box-shadow: 0 1px 3px rgba(0,0,0,0.3);
+    transition: transform 0.2s;
+  }
+  .switch input:checked + .track { background: var(--accent); }
+  .switch input:checked + .track::after { transform: translateX(12px); }
+  .switch .lbl { font-size: 0.72rem; color: var(--muted); letter-spacing: 0.04em; }
+
+  /* ---------- drop overlay + status ---------- */
+  #drop {
+    position: fixed; inset: 12px; z-index: 20;
+    border: 2.5px dashed var(--accent); border-radius: 22px;
+    background: color-mix(in srgb, var(--paper) 82%, transparent);
+    display: none; place-items: center;
+    font-family: ui-serif, "New York", Georgia, serif;
+    font-size: 1.6rem; color: var(--accent-ink);
+    pointer-events: none;
+  }
+  #drop.on { display: grid; }
+
+  #stats {
+    position: fixed; left: 22px; bottom: 8px;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 0.68rem; color: var(--muted);
+    z-index: 5;
+  }
+
+  @keyframes settle {
+    from { opacity: 0; transform: translateY(-8px); }
+    to { opacity: 1; transform: none; }
+  }
+  @keyframes pulse { 50% { opacity: 0.35; } }
+  .busy { animation: pulse 1.2s ease infinite; }
+</style>
+</head>
+<body>
+
+<nav>
+  <div class="brand"><span class="dot"></span>Audify</div>
+  <button class="ghost" id="pastebtn">Paste text</button>
+  <button class="ghost" id="openpdf">Open PDF</button>
+  <input type="file" id="pdffile" accept="application/pdf" hidden>
+</nav>
+
+<div id="pastepanel">
+  <textarea id="text" placeholder="Paste anything — an abstract, an article, a chapter…"></textarea>
+  <button class="primary" id="pastego" style="padding:9px 22px; font-size:0.88rem">Read this</button>
+</div>
+
+<main id="main">
+  <div id="empty">
+    <div class="glyph">❝</div>
+    <h2>Listen to any paper</h2>
+    <p>Drop a PDF anywhere — Audify rebuilds it as clean, readable text<br>
+       and reads it aloud with the current word highlighted. Fully offline.</p>
+    <button class="primary" id="emptyopen">Open a PDF</button>
+  </div>
+  <div id="reader"></div>
+</main>
+
+<div id="player">
+  <button id="playpause" title="Play / pause">
+    <svg id="icon-play" viewBox="0 0 24 24"><path d="M7 4.5v15l13-7.5z"/></svg>
+    <svg id="icon-pause" viewBox="0 0 24 24" style="display:none"><path d="M6 4h4v16H6zm8 0h4v16h-4z"/></svg>
+  </button>
+  <div class="meter">
+    <div id="progress"><div class="buffered"></div><div class="played"></div></div>
+    <div id="timeline"><span id="t-now">0:00</span><span id="t-total">0:00</span></div>
+  </div>
+  <select id="speed" title="Reading speed">
+    <option value="0.8">0.8×</option>
+    <option value="1" selected>1×</option>
+    <option value="1.2">1.2×</option>
+    <option value="1.5">1.5×</option>
+    <option value="2">2×</option>
+  </select>
+  <label class="switch" title="Follow the reading">
+    <input type="checkbox" id="autoscroll" checked>
+    <span class="track"></span>
+    <span class="lbl">follow</span>
+  </label>
+</div>
+
+<div id="drop">drop to read</div>
+<div id="stats"></div>
+
+<script>
+const $ = id => document.getElementById(id);
+
+// ---- document state ----
+let docBlocks = null;
+let joined = '';
+let spans = [];
+
+// ---- playback state ----
+let ctx = null;
+let marks = [];
+let segments = [];
+let sources = [];
+let streamT0 = 0;
+let audioMs = 0;
+let activeSpans = [];
+let activeIdx = -1;
+let raf = null;
+let abortCtl = null;
+let streaming = false;
+let lastPlayedMs = 0;
+
+function blocksFromText(text) {
+  return text.split(/\n{2,}/).map(t => t.trim()).filter(Boolean)
+             .map(t => ({ type: 'paragraph', text: t }));
+}
+
+function setDocument(blocks) {
+  docBlocks = blocks;
+  joined = blocks.map(b => b.text).join('\n\n');
+  $('empty').style.display = 'none';
+  renderDocument();
+  $('player').classList.add('visible');
+}
+
+function renderDocument() {
+  const reader = $('reader');
+  reader.textContent = '';
+  spans = [];
+  let offset = 0;
+  docBlocks.forEach((b, i) => {
+    if (i > 0) offset += 2;
+    const el = document.createElement(
+      b.type === 'title' ? 'h1' : b.type === 'heading' ? 'h2' : 'p');
+    for (const part of b.text.split(/(\s+)/)) {
+      if (!part) continue;
+      if (/^\s+$/.test(part)) {
+        el.appendChild(document.createTextNode(part));
+      } else {
+        const span = document.createElement('span');
+        span.className = 'word';
+        span.textContent = part;
+        const s = { el: span, start: offset, end: offset + part.length };
+        span.onclick = () => seekToOffset(s.start);
+        spans.push(s);
+        el.appendChild(span);
+      }
+      offset += part.length;
+    }
+    reader.appendChild(el);
+  });
+}
+
+// ---- lookups ----
+function markIndexAtTime(ms) {
+  let lo = 0, hi = marks.length - 1, idx = -1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (marks[mid].startTime <= ms) { idx = mid; lo = mid + 1; } else hi = mid - 1;
+  }
+  return idx;
+}
+function markIndexAtOffset(off) {
+  let lo = 0, hi = marks.length - 1, idx = -1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (marks[mid].start <= off) { idx = mid; lo = mid + 1; } else hi = mid - 1;
+  }
+  return idx;
+}
+function spansInRange(start, end) {
+  let lo = 0, hi = spans.length - 1, first = spans.length;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (spans[mid].end > start) { first = mid; hi = mid - 1; } else lo = mid + 1;
+  }
+  const out = [];
+  for (let i = first; i < spans.length && spans[i].start < end; i++) out.push(spans[i]);
+  return out;
+}
+
+// ---- audio ----
+function stopSources() {
+  sources.forEach(s => { try { s.onended = null; s.stop(); } catch (e) {} });
+  sources = [];
+}
+function resetPlayback() {
+  if (abortCtl) abortCtl.abort();
+  stopSources();
+  segments = []; marks = []; audioMs = 0; activeIdx = -1; lastPlayedMs = 0;
+  activeSpans.forEach(s => s.el.classList.remove('active'));
+  activeSpans = [];
+  if (raf) cancelAnimationFrame(raf);
+  if (ctx) { ctx.close(); ctx = null; }
+  setPlayIcon(true);
+}
+function scheduleSegment(seg, offsetMs = 0) {
+  const src = ctx.createBufferSource();
+  src.buffer = seg.buffer;
+  src.connect(ctx.destination);
+  src.start(streamT0 + (seg.startMs + offsetMs) / 1000, offsetMs / 1000);
+  sources.push(src);
+}
+function seekTo(ms) {
+  if (!ctx) return;
+  stopSources();
+  if (ctx.state === 'suspended') ctx.resume();
+  setPlayIcon(false);
+  streamT0 = ctx.currentTime + 0.05 - ms / 1000;
+  for (const seg of segments) {
+    const endMs = seg.startMs + seg.buffer.duration * 1000;
+    if (endMs <= ms) continue;
+    scheduleSegment(seg, Math.max(0, ms - seg.startMs));
+  }
+}
+function seekToOffset(off) {
+  const i = markIndexAtOffset(off);
+  if (i >= 0 && off < marks[i].end + 2) {
+    seekTo(marks[i].startTime);
+    return;
+  }
+  play(off).catch(handleErr);
+}
+
+// ---- highlight + progress ----
+function highlightAt(ms) {
+  const idx = markIndexAtTime(ms);
+  if (idx === activeIdx) return;
+  activeSpans.forEach(s => s.el.classList.remove('active'));
+  activeSpans = [];
+  activeIdx = idx;
+  if (idx < 0 || ms > marks[idx].endTime + 200) return;
+  const m = marks[idx];
+  activeSpans = spansInRange(m.start, m.end);
+  activeSpans.forEach(s => s.el.classList.add('active'));
+  if (activeSpans.length && $('autoscroll').checked) {
+    const el = activeSpans[0].el;
+    const main = $('main');
+    const r = el.getBoundingClientRect(), rr = main.getBoundingClientRect();
+    if (r.top < rr.top + 30 || r.bottom > rr.bottom - 110) {
+      el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    }
+  }
+}
+
+const fmt = ms => {
+  const s = Math.max(0, Math.round(ms / 1000));
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+};
+
+function tick() {
+  if (ctx) {
+    const now = Math.min(Math.max((ctx.currentTime - streamT0) * 1000, 0), audioMs);
+    if (ctx.state === 'running') { highlightAt(now); lastPlayedMs = now; }
+    $('t-now').textContent = fmt(lastPlayedMs);
+    $('t-total').textContent = fmt(audioMs) + (streaming ? '+' : '');
+    $('progress').querySelector('.played').style.width =
+      audioMs ? (lastPlayedMs / audioMs * 100) + '%' : '0';
+    $('progress').querySelector('.buffered').style.width = '100%';
+  }
+  raf = requestAnimationFrame(tick);
+}
+
+function setPlayIcon(showPlay) {
+  $('icon-play').style.display = showPlay ? '' : 'none';
+  $('icon-pause').style.display = showPlay ? 'none' : '';
+}
+
+function handleErr(e) {
+  if (e.name !== 'AbortError') $('stats').textContent = 'error: ' + e.message;
+}
+
+// ---- main flows ----
+async function play(fromOffset = 0) {
+  resetPlayback();
+  if (!docBlocks) {
+    const t = $('text').value.trim();
+    if (!t) return;
+    setDocument(blocksFromText(t));
+  }
+  setPlayIcon(false);
+  streaming = true;
+  const stats = $('stats');
+  stats.classList.add('busy');
+  const tFetch = performance.now();
+  let firstChunkMs = null;
+
+  ctx = new (window.AudioContext || window.webkitAudioContext)();
+  abortCtl = new AbortController();
+
+  const res = await fetch('/tts', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      text: joined,
+      start: fromOffset,
+      speed: parseFloat($('speed').value),
+    }),
+    signal: abortCtl.signal,
+  });
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = '';
+  raf = requestAnimationFrame(tick);
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    let nl;
+    while ((nl = buf.indexOf('\n')) >= 0) {
+      const line = buf.slice(0, nl); buf = buf.slice(nl + 1);
+      if (!line.trim()) continue;
+      const chunk = JSON.parse(line);
+      if (firstChunkMs === null) firstChunkMs = performance.now() - tFetch;
+
+      const bin = atob(chunk.pcm);
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      const int16 = new Int16Array(bytes.buffer);
+      const f32 = new Float32Array(int16.length);
+      for (let i = 0; i < int16.length; i++) f32[i] = int16[i] / 32768;
+      const buffer = ctx.createBuffer(1, f32.length, chunk.sampleRate);
+      buffer.copyToChannel(f32, 0);
+
+      const seg = { buffer, startMs: audioMs };
+      if (segments.length === 0) streamT0 = ctx.currentTime + 0.05;
+      segments.push(seg);
+      scheduleSegment(seg);
+      audioMs += buffer.duration * 1000;
+      marks.push(...chunk.marks);
+
+      stats.textContent =
+        `local · first audio ${Math.round(firstChunkMs)} ms · ` +
+        `${(chunk.audioElapsedMs / 1000).toFixed(0)}s synthesized ` +
+        `(${(chunk.synthElapsedMs / chunk.audioElapsedMs).toFixed(2)}× realtime)`;
+    }
+  }
+  streaming = false;
+  stats.classList.remove('busy');
+}
+
+$('playpause').onclick = () => {
+  if (!ctx) { play(0).catch(handleErr); return; }
+  if (ctx.state === 'running') { ctx.suspend(); setPlayIcon(true); }
+  else { ctx.resume(); setPlayIcon(false); }
+};
+
+$('speed').onchange = () => {
+  if (!ctx) return;
+  // restart from the current word at the new speed
+  const i = markIndexAtTime(lastPlayedMs);
+  play(i >= 0 ? marks[i].start : 0).catch(handleErr);
+};
+
+// ---- input sources ----
+$('pastebtn').onclick = () => $('pastepanel').classList.toggle('open');
+$('pastego').onclick = () => {
+  resetPlayback();
+  docBlocks = null;
+  $('pastepanel').classList.remove('open');
+  play(0).catch(handleErr);
+};
+$('text').addEventListener('input', () => { docBlocks = null; });
+
+$('openpdf').onclick = () => $('pdffile').click();
+$('emptyopen').onclick = () => $('pdffile').click();
+$('pdffile').onchange = () => { if ($('pdffile').files[0]) loadPdf($('pdffile').files[0]); };
+
+async function loadPdf(file) {
+  resetPlayback();
+  $('stats').textContent = `reading ${file.name} …`;
+  $('stats').classList.add('busy');
+  try {
+    const r = await fetch('/extract', { method: 'POST', body: file });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const d = await r.json();
+    setDocument(d.blocks);
+    $('main').scrollTop = 0;
+    $('stats').textContent =
+      `${file.name} · ${d.blocks.length} blocks · ${joined.length.toLocaleString()} characters`;
+  } catch (e) {
+    $('stats').textContent = `couldn't read ${file.name}: ${e.message}`;
+  }
+  $('stats').classList.remove('busy');
+  $('pdffile').value = '';
+}
+
+// drag & drop anywhere
+let dragDepth = 0;
+document.addEventListener('dragenter', e => {
+  e.preventDefault();
+  if (++dragDepth === 1) $('drop').classList.add('on');
+});
+document.addEventListener('dragleave', () => {
+  if (--dragDepth === 0) $('drop').classList.remove('on');
+});
+document.addEventListener('dragover', e => e.preventDefault());
+document.addEventListener('drop', e => {
+  e.preventDefault();
+  dragDepth = 0;
+  $('drop').classList.remove('on');
+  const f = [...e.dataTransfer.files].find(f => f.name.toLowerCase().endsWith('.pdf'));
+  if (f) loadPdf(f);
+});
+</script>
+</body>
+</html>

@@ -1,0 +1,19 @@
+# python
+.venv/
+__pycache__/
+*.pyc
+
+# build artifacts (all regenerable; see README "Standalone build")
+build/
+spike/out/
+audify-app/node_modules/
+audify-app/src-tauri/target/
+audify-app/src-tauri/engine/
+audify-app/src-tauri/gen/
+
+# downloaded / generated test papers
+spike/papers/
+
+# local tooling
+.claude/
+.DS_Store

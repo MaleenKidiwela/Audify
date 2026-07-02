@@ -1,0 +1,331 @@
+"""Scientific-PDF extraction for TTS -- structured "read mode" output.
+
+Pipeline:
+1. Redact margin line-number rails (digit-only words clustered at a
+   stable x in the margins -- the PDFBoT vertical-sweep idea).
+2. Detect column boxes with the vendored PyMuPDF `column_boxes`.
+3. Extract dict blocks per column, in reading order, classifying each as
+   title / heading / paragraph from font size + weight + section names.
+4. Drop running headers/footers: short blocks whose digit-normalized
+   text repeats across pages (catches journal running titles that sit
+   below the fixed header margin).
+5. Dehyphenate, unwrap, and merge paragraph continuations across
+   columns/pages (a paragraph that ends mid-sentence flows into the
+   next block).
+
+extract_blocks() -> [{"type": "title"|"heading"|"paragraph", "text": str}]
+extract()        -> plain text (blocks joined with blank lines)
+
+Usage:  python spike/pdf_extract.py <pdf> [max_pages]
+"""
+
+import re
+import sys
+from collections import Counter, defaultdict
+from pathlib import Path
+
+import fitz
+
+sys.path.insert(0, str(Path(__file__).parent / "vendor"))
+from multi_column import column_boxes
+
+MARGIN_FRACTION = 0.15
+MIN_RAIL_SIZE = 5
+X_CLUSTER_TOL = 4.0  # pt
+
+SECTION_RE = re.compile(
+    r"^(\d+(\.\d+)*\.?\s+)?(abstract|introduction|method(s|ology)?|results?"
+    r"|discussion|conclusions?|references|acknowledg\w+|appendix\w*"
+    r"|related work|background|data availability|supplementary\b.*)\s*$",
+    re.IGNORECASE,
+)
+NUMBERED_HEADING_RE = re.compile(r"^\d+(\.\d+)*\.?\s+[A-Z]")
+BOLD_FLAG = 1 << 4
+
+
+# ---------------------------------------------------------------- rails
+
+def find_line_number_rails(page: fitz.Page) -> list[fitz.Rect]:
+    """Return bboxes of margin line numbers on this page."""
+    words = page.get_text("words")
+    digit_words = [w for w in words if re.fullmatch(r"\d{1,4}", w[4])]
+
+    clusters: dict[float, list] = defaultdict(list)
+    for w in digit_words:
+        for cx in clusters:
+            if abs(w[0] - cx) <= X_CLUSTER_TOL:
+                clusters[cx].append(w)
+                break
+        else:
+            clusters[w[0]].append(w)
+
+    body = [w for w in words if w not in digit_words]
+    if not body:
+        return []
+    body_x0 = min(w[0] for w in body)
+    body_x1 = max(w[2] for w in body)
+
+    rails = []
+    page_w = page.rect.width
+    for cx, members in clusters.items():
+        if len(members) < MIN_RAIL_SIZE:
+            continue
+        in_outer_margin = cx < page_w * MARGIN_FRACTION or cx > page_w * (1 - MARGIN_FRACTION)
+        left_of_body = max(m[2] for m in members) <= body_x0 + 2
+        right_of_body = min(m[0] for m in members) >= body_x1 - 2
+        if in_outer_margin or left_of_body or right_of_body or _is_isolated_rail(members, words):
+            rails.extend(fitz.Rect(m[:4]) for m in members)
+    return rails
+
+
+def _is_isolated_rail(members, words) -> bool:
+    for m in members:
+        mx0, my0, mx1, my1 = m[:4]
+        for w in words:
+            if w is m or re.fullmatch(r"\d{1,4}", w[4]):
+                continue
+            same_line = not (w[3] < my0 or w[1] > my1)
+            if same_line and 0 <= mx0 - w[2] < 12:
+                return False
+    return True
+
+
+# ------------------------------------------------------------- cleanup
+
+# in-text citations read as noise -- strip every common style
+CITE_BRACKET_NUM = re.compile(r"\s*\[\d{1,3}(\s*[,–—-]\s*\d{1,3})*\]")
+# any parenthetical containing a year: (Peters et al., 2018a; Radford, 2019)
+CITE_AUTHOR_YEAR = re.compile(r"\s*\(\s*[^()]*\b(?:19|20)\d{2}[a-z]?[^()]*\)")
+# parenthetical numerics -- but keep "Eq. (3)" / "Figure (2)" references
+CITE_PAREN_NUM = re.compile(
+    r"(\b(?:eq|eqs|equation|fig|figs|figure|table|sec|section|step|item)s?\.?\s*)?"
+    r"\(\s*\d{1,3}(?:\s*[,–—-]\s*\d{1,3})*\s*\)",
+    re.IGNORECASE,
+)
+
+
+def _strip_citations(text: str) -> str:
+    text = CITE_BRACKET_NUM.sub("", text)
+    text = CITE_AUTHOR_YEAR.sub("", text)
+    text = CITE_PAREN_NUM.sub(lambda m: m.group(0) if m.group(1) else "", text)
+    return re.sub(r"\s+([.,;:!?])", r"\1", text)  # tidy "word ," leftovers
+
+
+def _clean_block_text(text: str) -> str:
+    # decomposed-ligature and hyphenation cleanup, then unwrap into prose
+    text = re.sub(r"(?<![-\w])(\w+)-\n[ \t]*([a-z]\w*)", r"\1\2", text)
+    text = re.sub(r"(\w)-\n[ \t]*(\w)", r"\1-\2", text)
+    text = re.sub(r"\s*\n\s*", " ", text).strip()
+    text = _strip_citations(text)
+    return re.sub(r" {2,}", " ", text)
+
+
+# ---------------------------------------------------------- extraction
+
+def _collect_raw_blocks(doc, max_pages=None):
+    """Per page, per column box: dict blocks with dominant font info."""
+    raw = []  # {page, text, size, bold, y0}
+    n_rails = 0
+    n_pages = min(len(doc), max_pages) if max_pages else len(doc)
+    for pno in range(n_pages):
+        page = doc[pno]
+        rails = find_line_number_rails(page)
+        n_rails += len(rails)
+        if rails:
+            for r in rails:
+                page.add_redact_annot(r)
+            page.apply_redactions()
+
+        boxes = column_boxes(page, footer_margin=50, header_margin=50, no_image_text=True)
+        for box in boxes:
+            d = page.get_text(
+                "dict", clip=box, sort=True,
+                flags=fitz.TEXTFLAGS_DICT & ~fitz.TEXT_PRESERVE_LIGATURES,
+            )
+            for blk in d["blocks"]:
+                if blk.get("type") != 0:
+                    continue
+                lines, sizes, bold_chars, total_chars = [], Counter(), 0, 0
+                for ln in blk["lines"]:
+                    spans = [
+                        s for s in ln["spans"]
+                        # superscript numeric citation / footnote markers
+                        if not (s["flags"] & 1 and re.fullmatch(r"[\d,\s–-]+", s["text"]))
+                    ]
+                    t = "".join(s["text"] for s in spans)
+                    if not t.strip():
+                        continue
+                    lines.append(t)
+                    for s in spans:
+                        n = len(s["text"].strip())
+                        if not n:
+                            continue
+                        sizes[round(s["size"] * 2) / 2] += n
+                        total_chars += n
+                        if s["flags"] & BOLD_FLAG:
+                            bold_chars += n
+                if not lines or not total_chars:
+                    continue
+                raw.append({
+                    "page": pno,
+                    "text": _clean_block_text("\n".join(lines)),
+                    "size": sizes.most_common(1)[0][0],
+                    "bold": bold_chars / total_chars > 0.6,
+                    "y0": blk["bbox"][1],
+                })
+    return raw, n_pages, n_rails
+
+
+def _drop_repeated_furniture(raw, n_pages):
+    """Remove running headers/footers: short digit-normalized text that
+    repeats across pages (catches the title fragments journals repeat)."""
+    if n_pages < 3:
+        return raw, 0
+    norm = lambda t: re.sub(r"\d+", "#", t).strip().lower()
+    pages_with = defaultdict(set)
+    for b in raw:
+        if len(b["text"]) < 120:
+            pages_with[norm(b["text"])].add(b["page"])
+    threshold = max(2, round(n_pages * 0.4))
+    furniture = {t for t, ps in pages_with.items() if len(ps) >= threshold}
+    kept = [b for b in raw if not (len(b["text"]) < 120 and norm(b["text"]) in furniture)]
+    return kept, len(raw) - len(kept)
+
+
+def _body_size(raw) -> float:
+    sizes = Counter()
+    for b in raw:
+        sizes[b["size"]] += len(b["text"])
+    return sizes.most_common(1)[0][0] if sizes else 10.0
+
+
+def _is_prose(text: str) -> bool:
+    """Reject figure/diagram text: streams of labels, symbols, axis ticks."""
+    tokens = text.split()
+    if not tokens:
+        return False
+    wordy = sum(
+        1 for t in tokens
+        if re.fullmatch(r"[A-Za-z][a-z’']+[.,;:!?)\"”]*", t)
+    )
+    return wordy / len(tokens) >= 0.4
+
+
+def _drop_non_prose(raw, body_size):
+    """Drop figure text and footnotes before paragraph merging, so prose
+    that flows around them stays adjacent."""
+    kept = []
+    dropped = 0
+    for b in raw:
+        # footnotes run ~2pt below body; abstracts only ~1pt (keep those)
+        is_footnote = b["size"] <= body_size - 1.6
+        heading_like = SECTION_RE.match(b["text"]) or (
+            NUMBERED_HEADING_RE.match(b["text"]) and len(b["text"]) < 80
+        )
+        if is_footnote or not (_is_prose(b["text"]) or heading_like):
+            dropped += 1
+            continue
+        kept.append(b)
+    return kept, dropped
+
+
+def _classify(raw, body_size):
+    """Assign title/heading/paragraph from font size, weight, names."""
+    if not raw:
+        return []
+
+    p1 = [b for b in raw if b["page"] == 0]
+    title_size = max((b["size"] for b in p1), default=0)
+
+    blocks = []
+    for b in raw:
+        text, size = b["text"], b["size"]
+        if (b["page"] == 0 and title_size > body_size * 1.2
+                and size >= title_size - 0.5 and b["y0"] < 350):
+            btype = "title"
+        elif len(text) < 120 and not text.endswith((".", ",", ";")) and (
+            size >= body_size * 1.12
+            or SECTION_RE.match(text)
+            or (b["bold"] and (NUMBERED_HEADING_RE.match(text) or len(text) < 60))
+        ):
+            btype = "heading"
+        else:
+            btype = "paragraph"
+        blocks.append({"type": btype, "text": text})
+
+    # merge consecutive same-type title blocks (multi-line titles)
+    merged = []
+    for blk in blocks:
+        if merged and blk["type"] == "title" and merged[-1]["type"] == "title":
+            merged[-1]["text"] += " " + blk["text"]
+        else:
+            merged.append(blk)
+    return merged
+
+
+def _merge_continuations(blocks):
+    """A paragraph that ends mid-sentence flows into the next paragraph
+    (column/page break in the middle of a sentence)."""
+    out = []
+    for blk in blocks:
+        prev = out[-1] if out else None
+        if (prev and blk["type"] == "paragraph" and prev["type"] == "paragraph"
+                and prev["text"] and not prev["text"].endswith((".", "!", "?", ":", '"', "”"))):
+            joiner = "" if prev["text"].endswith("-") else " "
+            if prev["text"].endswith("-") and blk["text"][:1].islower():
+                prev["text"] = prev["text"][:-1]
+            prev["text"] += joiner + blk["text"]
+        else:
+            out.append(blk)
+    return out
+
+
+SKIP_SECTION_RE = re.compile(
+    r"^(\d+(\.\d+)*\.?\s+)?(references|bibliography|acknowledg\w+)\s*$", re.IGNORECASE
+)
+
+
+def _drop_skip_sections(blocks):
+    """Remove the References/Acknowledgments sections wholesale -- nobody
+    wants reference lists read aloud."""
+    out, skipping = [], False
+    for b in blocks:
+        if b["type"] in ("heading", "title"):
+            skipping = bool(SKIP_SECTION_RE.match(b["text"]))
+            if skipping:
+                continue
+        if not skipping:
+            out.append(b)
+    return out
+
+
+def extract_blocks(pdf, max_pages: int | None = None) -> list[dict]:
+    if isinstance(pdf, (bytes, bytearray)):
+        doc = fitz.open(stream=pdf, filetype="pdf")
+        name = "<bytes>"
+    else:
+        doc = fitz.open(pdf)
+        name = Path(pdf).name
+
+    raw, n_pages, n_rails = _collect_raw_blocks(doc, max_pages)
+    raw, n_furniture = _drop_repeated_furniture(raw, n_pages)
+    body_size = _body_size(raw)
+    raw, n_nonprose = _drop_non_prose(raw, body_size)
+    blocks = _drop_skip_sections(_merge_continuations(_classify(raw, body_size)))
+    print(f"[{name}] {n_pages} pages, {n_rails} margin line-numbers stripped, "
+          f"{n_furniture} running header/footer blocks dropped, "
+          f"{n_nonprose} figure/footnote blocks dropped, "
+          f"{len(blocks)} blocks", file=sys.stderr)
+    return blocks
+
+
+def extract(pdf, max_pages: int | None = None) -> str:
+    return "\n\n".join(b["text"] for b in extract_blocks(pdf, max_pages))
+
+
+if __name__ == "__main__":
+    pdf = sys.argv[1]
+    max_pages = int(sys.argv[2]) if len(sys.argv) > 2 else None
+    for b in extract_blocks(pdf, max_pages):
+        tag = {"title": "T", "heading": "H", "paragraph": "P"}[b["type"]]
+        print(f"[{tag}] {b['text'][:110]}")
