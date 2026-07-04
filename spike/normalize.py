@@ -107,7 +107,39 @@ def _num_unit(m: re.Match) -> str:
 
 _UNIT_ALT = "|".join(sorted(UNITS, key=len, reverse=True))
 
+# abbreviations: expanding them fixes pronunciation AND removes the "."
+# that the sentence splitter would otherwise treat as a chunk boundary
+# ("Fig. 1" no longer pauses between "Fig." and "1")
+ABBREVIATIONS = {
+    "Fig.": "figure", "Figs.": "figures", "fig.": "figure", "figs.": "figures",
+    "Eq.": "equation", "Eqs.": "equations", "eq.": "equation", "eqs.": "equations",
+    "Sec.": "section", "Secs.": "sections",
+    "Ref.": "reference", "Refs.": "references",
+    "Tab.": "table", "No.": "number", "Vol.": "volume",
+    "e.g.": "for example", "i.e.": "that is", "cf.": "compare",
+    "vs.": "versus", "et al.": "and colleagues",
+    "approx.": "approximately", "resp.": "respectively",
+}
+_ABBREV_RE = re.compile(
+    "|".join(re.escape(k) for k in sorted(ABBREVIATIONS, key=len, reverse=True))
+)
+
+ROMAN_RE = re.compile(r"^[IVXLCDM]+$")
+
+
+def _spell_acronym(m: re.Match) -> str:
+    word, plural = m.group(1), m.group(2)
+    if ROMAN_RE.match(word):
+        return m.group(0)
+    letters = list(word)
+    if plural:
+        letters[-1] += plural  # "PERs" -> "P E Rs" ("pee ee ars")
+    return " ".join(letters)
+
+
 RULES = [
+    # expand abbreviations first so later rules see clean text
+    (_ABBREV_RE, lambda m: ABBREVIATIONS[m.group()]),
     # 1.5e-9 / 2E+8  (exponent needs a sign or 1-2 digits; keeps "2018e" out)
     (re.compile(r"\b(\d+(?:\.\d+)?)[eE]([+-]\d+|\d\d?)\b"), _sci_notation),
     # 3 × 10^8, 3 x 10**8, 10⁻⁹, bare 10^8
@@ -133,6 +165,9 @@ RULES = [
     # greek + symbols, padded with spaces so words don't fuse
     (re.compile("|".join(map(re.escape, GREEK))), lambda m: f" {GREEK[m.group()]} "),
     (re.compile("|".join(map(re.escape, SYMBOLS))), lambda m: f" {SYMBOLS[m.group()]} "),
+    # all-caps acronyms spell out as letters: PERs -> "P E Rs", DNA -> "D N A"
+    # (Roman numerals kept; runs after unit rules so "5 GHz" is untouched)
+    (re.compile(r"\b([A-Z]{2,6})(s?)\b(?![a-z\d])"), _spell_acronym),
 ]
 
 

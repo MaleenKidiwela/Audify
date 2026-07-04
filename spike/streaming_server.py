@@ -86,6 +86,21 @@ def get_pipeline(voice: str) -> KokoroPipeline:
 pipeline = get_pipeline(VOICE)
 print(f"Model ready in {time.perf_counter() - t0:.1f}s")
 
+FADE_SAMPLES = 96  # 4 ms at 24 kHz
+
+
+def _defade(audio: "np.ndarray") -> "np.ndarray":
+    """Micro fade-in/out per chunk: kills clicks ("static") at the joins
+    between independently synthesized segments."""
+    n = min(FADE_SAMPLES, len(audio) // 4)
+    if n > 0:
+        ramp = np.linspace(0.0, 1.0, n, dtype=audio.dtype)
+        audio = audio.copy()
+        audio[:n] *= ramp
+        audio[-n:] *= ramp[::-1]
+    return audio
+
+
 app = FastAPI()
 # the Tauri webview calls from tauri://localhost; localhost-only server, so
 # a permissive CORS policy is fine
@@ -143,7 +158,7 @@ def _run_export(req: ExportRequest):
         for result in pipe(
             spoken, voice=voice, speed=req.speed, split_pattern=SPLIT_PATTERN
         ):
-            chunks.append(np.asarray(result.audio).squeeze())
+            chunks.append(_defade(np.asarray(result.audio).squeeze()))
             done += len(result.graphemes)
             EXPORT["progress"] = min(done / total, 0.99)
         audio = np.concatenate(chunks)
@@ -219,7 +234,7 @@ def tts(req: TTSRequest):
         for result in pipe(
             spoken, voice=voice, speed=req.speed, split_pattern=SPLIT_PATTERN
         ):
-            audio = np.asarray(result.audio).squeeze()
+            audio = _defade(np.asarray(result.audio).squeeze())
             marks = []
             for token in result.tokens or []:
                 if token.start_ts is None or token.end_ts is None:

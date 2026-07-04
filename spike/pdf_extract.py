@@ -92,6 +92,11 @@ def _is_isolated_rail(members, words) -> bool:
 
 # ------------------------------------------------------------- cleanup
 
+# links read as garbage -- remove them entirely
+URL_RE = re.compile(
+    r"(?:https?://|www\.|doi\.org/|doi:\s*10\.)\S+|\b10\.\d{4,}/\S+", re.IGNORECASE
+)
+
 # in-text citations read as noise -- strip every common style
 CITE_BRACKET_NUM = re.compile(r"\s*\[\d{1,3}(\s*[,–—-]\s*\d{1,3})*\]")
 # any parenthetical containing a year: (Peters et al., 2018a; Radford, 2019)
@@ -105,9 +110,11 @@ CITE_PAREN_NUM = re.compile(
 
 
 def _strip_citations(text: str) -> str:
+    text = URL_RE.sub("", text)
     text = CITE_BRACKET_NUM.sub("", text)
     text = CITE_AUTHOR_YEAR.sub("", text)
     text = CITE_PAREN_NUM.sub(lambda m: m.group(0) if m.group(1) else "", text)
+    text = re.sub(r"\(\s*\)", "", text)  # parens emptied by URL removal
     return re.sub(r"\s+([.,;:!?])", r"\1", text)  # tidy "word ," leftovers
 
 
@@ -122,10 +129,52 @@ def _clean_block_text(text: str) -> str:
 
 # ---------------------------------------------------------- extraction
 
+def _figure_table_rects(page) -> list[fitz.Rect]:
+    """Bounding boxes of figures (raster images + dense vector-drawing
+    clusters) and tables. Text inside these is dropped."""
+    rects = []
+    for info in page.get_image_info():
+        r = fitz.Rect(info["bbox"])
+        if r.get_area() > 2000:
+            rects.append(r)
+    try:
+        for t in page.find_tables():
+            rects.append(fitz.Rect(t.bbox))
+    except Exception:
+        pass
+    # vector figures: union up drawing paths, keep clusters of real size
+    cluster = None
+    for d in page.get_drawings():
+        r = fitz.Rect(d["rect"])
+        if r.get_area() < 50 or r.width > page.rect.width * 0.95:
+            continue
+        if cluster and (cluster & r or (cluster | r).get_area()
+                        < cluster.get_area() + r.get_area() + 8000):
+            cluster |= r
+        else:
+            if cluster and cluster.get_area() > 12000:
+                rects.append(fitz.Rect(cluster))
+            cluster = r
+    if cluster and cluster.get_area() > 12000:
+        rects.append(fitz.Rect(cluster))
+    return rects
+
+
+def _in_figure(bbox, fig_rects) -> bool:
+    r = fitz.Rect(bbox)
+    if r.is_empty:
+        return False
+    for f in fig_rects:
+        if (r & f).get_area() > 0.5 * r.get_area():
+            return True
+    return False
+
+
 def _collect_raw_blocks(doc, max_pages=None):
     """Per page, per column box: dict blocks with dominant font info."""
     raw = []  # {page, text, size, bold, y0}
     n_rails = 0
+    n_fig = 0
     n_pages = min(len(doc), max_pages) if max_pages else len(doc)
     for pno in range(n_pages):
         page = doc[pno]
@@ -136,6 +185,7 @@ def _collect_raw_blocks(doc, max_pages=None):
                 page.add_redact_annot(r)
             page.apply_redactions()
 
+        fig_rects = _figure_table_rects(page)
         boxes = column_boxes(page, footer_margin=50, header_margin=50, no_image_text=True)
         for box in boxes:
             d = page.get_text(
@@ -144,6 +194,9 @@ def _collect_raw_blocks(doc, max_pages=None):
             )
             for blk in d["blocks"]:
                 if blk.get("type") != 0:
+                    continue
+                if _in_figure(blk["bbox"], fig_rects):
+                    n_fig += 1
                     continue
                 lines, sizes, bold_chars, total_chars = [], Counter(), 0, 0
                 for ln in blk["lines"]:
@@ -173,7 +226,7 @@ def _collect_raw_blocks(doc, max_pages=None):
                     "bold": bold_chars / total_chars > 0.6,
                     "y0": blk["bbox"][1],
                 })
-    return raw, n_pages, n_rails
+    return raw, n_pages, n_rails, n_fig
 
 
 def _drop_repeated_furniture(raw, n_pages):
@@ -211,9 +264,17 @@ def _is_prose(text: str) -> bool:
     return wordy / len(tokens) >= 0.4
 
 
+def _is_reference_entry(text: str) -> bool:
+    """Bibliography entries that escaped section-level removal: dense with
+    author initials ("A. B.") plus volume/page-range numerics."""
+    initials = len(re.findall(r"\b[A-Z]\.", text))
+    ranges = len(re.findall(r"\d+,\s*\d+\s*[-–]\s*\d+", text))
+    return initials >= 3 and (ranges >= 1 or initials >= 6)
+
+
 def _drop_non_prose(raw, body_size):
-    """Drop figure text and footnotes before paragraph merging, so prose
-    that flows around them stays adjacent."""
+    """Drop figure text, footnotes, and stray reference entries before
+    paragraph merging, so prose that flows around them stays adjacent."""
     kept = []
     dropped = 0
     for b in raw:
@@ -222,7 +283,9 @@ def _drop_non_prose(raw, body_size):
         heading_like = SECTION_RE.match(b["text"]) or (
             NUMBERED_HEADING_RE.match(b["text"]) and len(b["text"]) < 80
         )
-        if is_footnote or not (_is_prose(b["text"]) or heading_like):
+        if is_footnote or _is_reference_entry(b["text"]) or not (
+            _is_prose(b["text"]) or heading_like
+        ):
             dropped += 1
             continue
         kept.append(b)
@@ -246,8 +309,11 @@ def _classify(raw, body_size):
         elif len(text) < 120 and not text.endswith((".", ",", ";")) and (
             size >= body_size * 1.12
             or SECTION_RE.match(text)
-            or (b["bold"] and (NUMBERED_HEADING_RE.match(text) or len(text) < 60))
+            or (b["bold"] and NUMBERED_HEADING_RE.match(text))
         ):
+            # NOTE: bold alone is NOT a heading -- bold inline lead-ins and
+            # split font runs ("Success" + "rate") otherwise become separate
+            # chunks and read with a false pause
             btype = "heading"
         else:
             btype = "paragraph"
@@ -307,14 +373,15 @@ def extract_blocks(pdf, max_pages: int | None = None) -> list[dict]:
         doc = fitz.open(pdf)
         name = Path(pdf).name
 
-    raw, n_pages, n_rails = _collect_raw_blocks(doc, max_pages)
+    raw, n_pages, n_rails, n_fig = _collect_raw_blocks(doc, max_pages)
     raw, n_furniture = _drop_repeated_furniture(raw, n_pages)
     body_size = _body_size(raw)
     raw, n_nonprose = _drop_non_prose(raw, body_size)
     blocks = _drop_skip_sections(_merge_continuations(_classify(raw, body_size)))
     print(f"[{name}] {n_pages} pages, {n_rails} margin line-numbers stripped, "
           f"{n_furniture} running header/footer blocks dropped, "
-          f"{n_nonprose} figure/footnote blocks dropped, "
+          f"{n_fig} figure/table-region blocks dropped, "
+          f"{n_nonprose} figure/footnote/reference blocks dropped, "
           f"{len(blocks)} blocks", file=sys.stderr)
     return blocks
 
