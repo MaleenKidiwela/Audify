@@ -114,7 +114,9 @@ def _is_isolated_rail(members, words) -> bool:
 
 # links read as garbage -- remove them entirely
 URL_RE = re.compile(
-    r"(?:https?://|www\.|doi\.org/|doi:\s*10\.)\S+|\b10\.\d{4,}/\S+", re.IGNORECASE
+    r"(?:https?://|www\.|doi\.org/|doi:\s*10\.)\S+|\b10\.\d{4,}/\S+"
+    r"|\b[a-z0-9][\w-]*\.(?:com|org|net|edu|gov|io|ai)\b(?:/\S*)?",
+    re.IGNORECASE,
 )
 
 # in-text citations read as noise -- strip every common style
@@ -271,17 +273,29 @@ def _line_record(ln):
 
 def _line_is_heading(rec, body_size) -> bool:
     t = rec["text"].strip()
+    if len(t) <= 2 or t.lower() in ("fig", "a", "b", "c", "d", "e", "f"):
+        return False  # bare figure panel letters, stray glyphs
     if not t or len(t) > 100 or t.endswith((".", ",", ";", ":")):
         # section names may end in ':' — allow those explicitly below
         if not (t.endswith(":") and len(t) < 40):
             return False
-    if CAPTION_RE.match(t) or t.lower() in ARTICLE_LABELS or t.islower():
-        return False  # captions, article-type labels, journal branding
+    if CAPTION_RE.match(t) or t.lower() in ARTICLE_LABELS:
+        return False  # captions, article-type labels
+    # lowercase rejects journal branding ("nature neuroscience") but NOT a
+    # heading wrap-line (2nd line of a two-line heading is lowercase yet
+    # heading-styled) -- keep it if heading-sized or bold
+    if t.islower() and rec["size"] < body_size * 1.09 and not rec["bold"]:
+        return False
     if _is_reference_entry(t):
         return False  # numbered bibliography entries look numbered-heading-ish
-    # numbered section heading: small number, short title ("3.2 Fine-tuning")
-    numbered = bool(NUMBERED_HEADING_RE.match(t)) and len(t) < 60 and (
-        int(re.match(r"\d+", t).group()) <= 40
+    # numbered section heading: small integer, short title ("3.2 Fine-tuning").
+    # Reject decimals ("0.3 F1 behind…") and sentence-internal periods
+    # ("…model. This") -- those are body fragments, not headings.
+    numbered = (
+        bool(NUMBERED_HEADING_RE.match(t)) and len(t) < 60
+        and not re.match(r"\d+\.\d", t)
+        and not re.search(r"[a-z]\.\s+[A-Z]", t)
+        and int(re.match(r"\d+", t).group()) <= 40
     )
     return (
         rec["size"] >= body_size * 1.09
@@ -359,7 +373,7 @@ def _body_size(raw) -> float:
     return sizes.most_common(1)[0][0] if sizes else 10.0
 
 
-def _is_prose(text: str) -> bool:
+def _is_prose(text: str, threshold: float = 0.4) -> bool:
     """Reject figure/diagram text: streams of labels, symbols, axis ticks."""
     tokens = text.split()
     if not tokens:
@@ -368,7 +382,59 @@ def _is_prose(text: str) -> bool:
         1 for t in tokens
         if re.fullmatch(r"[A-Za-z][a-z’']+[.,;:!?)\"”]*", t)
     )
-    return wordy / len(tokens) >= 0.4
+    return wordy / len(tokens) >= threshold
+
+
+# figure/table legend text sits BELOW the image (outside its bbox), so region
+# detection misses it -- catch it by its textual signature
+_STAT_MARKERS = [
+    r"P\s*[<=>]\s*0?\.\d", r"\bns\s*[<=>]", r"\bn\s*=\s*\d",
+    r"\bs\.?d\.?\b", r"\bs\.?e\.?m\.?\b", r"wilcoxon", r"bonferroni|bonferonni",
+    r"two[-\s]tailed|one[-\s]tailed", r"pearson|spearman", r"±|\+/[-−]",
+    r"\bt[-\s]test\b", r"chi[-\s]square", r"95%\s*(ci|confidence)",
+    r"error\s+bars?", r"scale\s+bar",
+]
+_STAT_RE = [re.compile(p, re.IGNORECASE) for p in _STAT_MARKERS]
+_LEGEND_BOILERPLATE = re.compile(
+    r"of this figure is available|data are (?:shown|presented|expressed) as"
+    r"|center\s+line|whiskers?|box[-\s]?plot|shaded (?:area|region)"
+    r"|dashed lines?|solid lines?|denotes? (?:the |previous |significan)"
+    r"|each (?:dot|point|circle) (?:represents|indicates)",
+    re.IGNORECASE,
+)
+_PANEL_START = re.compile(r"^\(?[a-h]\)[\s,]|^\(?[a-h]\)$")
+
+
+def _is_caption(text: str) -> bool:
+    t = text.strip()
+    if CAPTION_RE.match(t):
+        return True
+    # panel marker only counts as caption for short label-like text, so an
+    # in-text lettered list ("(a) The left approach…") isn't over-dropped
+    if _PANEL_START.match(t) and (len(t) < 120 or not _is_prose(t, 0.5)):
+        return True
+    if _LEGEND_BOILERPLATE.search(t):
+        return True
+    # dense statistical annotation with weak prose flow -> a legend, not
+    # a results sentence (which reads as prose and cites stats sparingly)
+    hits = sum(1 for r in _STAT_RE if r.search(t))
+    if hits >= 3 and not _is_prose(t, threshold=0.55):
+        return True
+    # chart axis / legend label runs: no sentence punctuation and a high
+    # fraction of capitalized label tokens ("Phoneme Word Character Error
+    # rate type for ECoG speech synthesis"). Body prose has periods and few
+    # capitals; continuation fragments start lowercase (excluded here).
+    words = t.split()
+    no_sentence = not re.search(r"[.!?]", t)
+    if len(words) >= 5 and t[:1].isupper() and no_sentence:
+        caps = sum(1 for w in words if w[:1].isupper())
+        if caps / len(words) >= 0.4:
+            return True
+    # short label fragment with no sentence ("Output modality", "Latency
+    # type") -- a real body paragraph is a full sentence, never 1-4 words
+    if 0 < len(words) < 5 and no_sentence and not t.rstrip().endswith((":", ",")):
+        return True
+    return False
 
 
 def _is_reference_entry(text: str) -> bool:
@@ -405,9 +471,9 @@ def _drop_non_prose(raw, body_size):
         heading_like = b.get("is_heading") or SECTION_RE.match(t) or (
             NUMBERED_HEADING_RE.match(t) and len(t) < 80
         )
-        if is_furniture or is_footnote or _is_reference_entry(t) or not (
-            _is_prose(t) or heading_like
-        ):
+        if is_furniture or is_footnote or _is_reference_entry(t) or (
+            not heading_like and _is_caption(t)
+        ) or not (_is_prose(t) or heading_like):
             dropped += 1
             continue
         kept.append(b)
@@ -455,12 +521,20 @@ def _classify(raw, body_size):
 
 def _merge_continuations(blocks):
     """A paragraph that ends mid-sentence flows into the next paragraph
-    (column/page break in the middle of a sentence)."""
+    (column/page break in the middle of a sentence). Only merge a CLEAR
+    continuation -- the next paragraph starts lowercase, or the previous
+    ends with a hyphen -- so two capitalized sentences that column-reorder
+    left adjacent don't get fused into one garbled sentence."""
     out = []
     for blk in blocks:
         prev = out[-1] if out else None
-        if (prev and blk["type"] == "paragraph" and prev["type"] == "paragraph"
-                and prev["text"] and not prev["text"].endswith((".", "!", "?", ":", '"', "”"))):
+        cont = (
+            prev and blk["type"] == "paragraph" and prev["type"] == "paragraph"
+            and prev["text"]
+            and not prev["text"].endswith((".", "!", "?", ":", '"', "”"))
+            and (blk["text"][:1].islower() or prev["text"].endswith("-"))
+        )
+        if cont:
             joiner = "" if prev["text"].endswith("-") else " "
             if prev["text"].endswith("-") and blk["text"][:1].islower():
                 prev["text"] = prev["text"][:-1]
@@ -471,21 +545,61 @@ def _merge_continuations(blocks):
 
 
 SKIP_SECTION_RE = re.compile(
-    r"^(\d+(\.\d+)*\.?\s+)?(references|bibliography|acknowledg\w+)\s*$", re.IGNORECASE
+    r"^(\d+(\.\d+)*\.?\s+)?("
+    r"references(\s+and\s+notes)?|bibliography|literature\s+cited|works\s+cited"
+    r"|acknowledg\w+|author\s+contributions?|(declaration\s+of\s+)?compet\w+\s+interests?"
+    r"|conflicts?\s+of\s+interest|data\s+(and\s+resources|availability)"
+    r"|code\s+availability|funding(\s+information)?|online\s+content"
+    r")\s*:?\s*$",
+    re.IGNORECASE,
+)
+
+
+# terminal back-matter: once seen, everything after is boilerplate/template
+# (journal back-matter always trails the real content, incl. Methods in Nature)
+TERMINAL_SECTION_RE = re.compile(
+    r"^(additional information|supplementary information|reporting summary"
+    r"|peer review|reprints|inclusion (and|&) ethics|ethics declarations"
+    r"|about this article)\b",
+    re.IGNORECASE,
 )
 
 
 def _drop_skip_sections(blocks):
-    """Remove the References/Acknowledgments sections wholesale -- nobody
-    wants reference lists read aloud."""
+    """Remove References and other boilerplate end-matter sections wholesale.
+    Reset-type skips self-correct at the next real heading (safe when, as in
+    Nature, the reference list sits mid-document ahead of Methods); terminal
+    back-matter drops everything to the end."""
     out, skipping = [], False
     for b in blocks:
         if b["type"] in ("heading", "title"):
-            skipping = bool(SKIP_SECTION_RE.match(b["text"]))
+            if TERMINAL_SECTION_RE.match(b["text"].strip()):
+                break
+            skipping = bool(SKIP_SECTION_RE.match(b["text"].strip()))
             if skipping:
                 continue
         if not skipping:
             out.append(b)
+    return out
+
+
+def _drop_reference_runs(blocks):
+    """Belt-and-suspenders: drop any run of 2+ consecutive reference entries
+    that slipped past per-entry filtering (unheadinged bibliographies)."""
+    flags = [b["type"] == "paragraph" and _is_reference_entry(b["text"])
+             for b in blocks]
+    out = []
+    i = 0
+    while i < len(blocks):
+        if flags[i]:
+            j = i
+            while j < len(blocks) and flags[j]:
+                j += 1
+            if j - i >= 2:
+                i = j
+                continue
+        out.append(blocks[i])
+        i += 1
     return out
 
 
@@ -501,7 +615,9 @@ def extract_blocks(pdf, max_pages: int | None = None) -> list[dict]:
     raw, n_furniture = _drop_repeated_furniture(raw, n_pages)
     body_size = _body_size(raw)
     raw, n_nonprose = _drop_non_prose(raw, body_size)
-    blocks = _drop_skip_sections(_merge_continuations(_classify(raw, body_size)))
+    blocks = _drop_reference_runs(
+        _drop_skip_sections(_merge_continuations(_classify(raw, body_size)))
+    )
     print(f"[{name}] {n_pages} pages, {n_rails} margin line-numbers stripped, "
           f"{n_furniture} running header/footer blocks dropped, "
           f"{n_fig} figure/table-region blocks dropped, "
