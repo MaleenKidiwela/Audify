@@ -17,3 +17,6 @@ spike/papers/
 # local tooling
 .claude/
 .DS_Store
+
+# copyrighted test papers (kept locally, never published)
+/*.pdf

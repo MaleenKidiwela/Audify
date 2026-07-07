@@ -41,6 +41,26 @@ SECTION_RE = re.compile(
 )
 NUMBERED_HEADING_RE = re.compile(r"^\d+(\.\d+)*\.?\s+[A-Z]")
 BOLD_FLAG = 1 << 4
+# named-bold fonts don't set the synthetic-bold flag (Nature's HardingText-Bold,
+# SRL's AdvOT….B); recognize them by PostScript name
+BOLD_NAME_RE = re.compile(r"bold|semibold|black|heavy|\.b$|-b$", re.IGNORECASE)
+
+# figure/table captions ("Table 1 | …", "Fig. 3 | …", "Extended Data Table 1")
+# and journal article-type labels / branding that shouldn't be read or headed
+CAPTION_RE = re.compile(
+    r"^(?:extended\s+data\s+|sup(?:plementary|pl?\.?)\s+)?"
+    r"(?:table|fig(?:ure|s)?\.?)\s*\d+\b",
+    re.IGNORECASE,
+)
+ARTICLE_LABELS = {
+    "technical report", "article", "letter", "review", "perspective",
+    "brief communication", "resource", "analysis", "matters arising",
+    "research article", "research", "report",
+}
+
+
+def _is_bold_span(span) -> bool:
+    return bool(span["flags"] & BOLD_FLAG) or bool(BOLD_NAME_RE.search(span["font"]))
 
 
 # ---------------------------------------------------------------- rails
@@ -170,12 +190,28 @@ def _in_figure(bbox, fig_rects) -> bool:
     return False
 
 
+def _doc_body_size(doc, n_pages) -> float:
+    """Char-weighted dominant font size across the document body."""
+    sizes = Counter()
+    for pno in range(n_pages):
+        for blk in doc[pno].get_text("dict")["blocks"]:
+            if blk.get("type"):
+                continue
+            for ln in blk["lines"]:
+                for s in ln["spans"]:
+                    n = len(s["text"].strip())
+                    if n:
+                        sizes[round(s["size"] * 2) / 2] += n
+    return sizes.most_common(1)[0][0] if sizes else 10.0
+
+
 def _collect_raw_blocks(doc, max_pages=None):
     """Per page, per column box: dict blocks with dominant font info."""
-    raw = []  # {page, text, size, bold, y0}
+    raw = []  # {page, text, size, bold, is_heading, y0}
     n_rails = 0
     n_fig = 0
     n_pages = min(len(doc), max_pages) if max_pages else len(doc)
+    body_size = _doc_body_size(doc, n_pages)
     for pno in range(n_pages):
         page = doc[pno]
         rails = find_line_number_rails(page)
@@ -198,35 +234,106 @@ def _collect_raw_blocks(doc, max_pages=None):
                 if _in_figure(blk["bbox"], fig_rects):
                     n_fig += 1
                     continue
-                lines, sizes, bold_chars, total_chars = [], Counter(), 0, 0
-                for ln in blk["lines"]:
-                    spans = [
-                        s for s in ln["spans"]
-                        # superscript numeric citation / footnote markers
-                        if not (s["flags"] & 1 and re.fullmatch(r"[\d,\s–-]+", s["text"]))
-                    ]
-                    t = "".join(s["text"] for s in spans)
-                    if not t.strip():
-                        continue
-                    lines.append(t)
-                    for s in spans:
-                        n = len(s["text"].strip())
-                        if not n:
-                            continue
-                        sizes[round(s["size"] * 2) / 2] += n
-                        total_chars += n
-                        if s["flags"] & BOLD_FLAG:
-                            bold_chars += n
-                if not lines or not total_chars:
-                    continue
-                raw.append({
-                    "page": pno,
-                    "text": _clean_block_text("\n".join(lines)),
-                    "size": sizes.most_common(1)[0][0],
-                    "bold": bold_chars / total_chars > 0.6,
-                    "y0": blk["bbox"][1],
-                })
+                # per-line records so a heading line that shares a block with
+                # its following paragraph (Nature/SRL layout) is detected, not
+                # averaged away into a body-sized paragraph
+                for seg in _segment_block(blk, body_size):
+                    seg["page"] = pno
+                    seg["y0"] = blk["bbox"][1]
+                    raw.append(seg)
     return raw, n_pages, n_rails, n_fig
+
+
+def _line_record(ln):
+    """(text, dominant_size, bold_fraction) for one line, dropping
+    superscript numeric citation/footnote markers."""
+    spans = [
+        s for s in ln["spans"]
+        if not (s["flags"] & 1 and re.fullmatch(r"[\d,\s–-]+", s["text"]))
+    ]
+    text = "".join(s["text"] for s in spans)
+    if not text.strip():
+        return None
+    sizes, bold_chars, total = Counter(), 0, 0
+    for s in spans:
+        n = len(s["text"].strip())
+        if not n:
+            continue
+        sizes[round(s["size"] * 2) / 2] += n
+        total += n
+        if _is_bold_span(s):
+            bold_chars += n
+    if not total:
+        return None
+    return {"text": text, "size": sizes.most_common(1)[0][0],
+            "bold": bold_chars / total > 0.6}
+
+
+def _line_is_heading(rec, body_size) -> bool:
+    t = rec["text"].strip()
+    if not t or len(t) > 100 or t.endswith((".", ",", ";", ":")):
+        # section names may end in ':' — allow those explicitly below
+        if not (t.endswith(":") and len(t) < 40):
+            return False
+    if CAPTION_RE.match(t) or t.lower() in ARTICLE_LABELS or t.islower():
+        return False  # captions, article-type labels, journal branding
+    if _is_reference_entry(t):
+        return False  # numbered bibliography entries look numbered-heading-ish
+    # numbered section heading: small number, short title ("3.2 Fine-tuning")
+    numbered = bool(NUMBERED_HEADING_RE.match(t)) and len(t) < 60 and (
+        int(re.match(r"\d+", t).group()) <= 40
+    )
+    return (
+        rec["size"] >= body_size * 1.09
+        or bool(SECTION_RE.match(t))
+        or numbered
+        or (rec["bold"] and rec["size"] >= body_size * 1.03 and len(t) < 70)
+    )
+
+
+def _segment_block(blk, body_size):
+    """Split a text block into heading / paragraph segments by walking its
+    lines and grouping runs of the same kind. A caption line drops the whole
+    block (figure/table caption bodies aren't read)."""
+    recs = [r for ln in blk["lines"] if (r := _line_record(ln))]
+    if not recs:
+        return []
+    if CAPTION_RE.match(recs[0]["text"].strip()):
+        return []
+
+    segs, cur, cur_head = [], [], None
+    for r in recs:
+        is_head = _line_is_heading(r, body_size)
+        # break on kind change, or between two stacked headings of different
+        # size (major section + subsection) so they don't concatenate
+        size_break = (
+            is_head and cur_head and cur
+            and abs(r["size"] - cur[-1]["size"]) > 1.0
+        )
+        if cur and (is_head != cur_head or size_break):
+            segs.append((cur_head, cur))
+            cur = []
+        cur.append(r)
+        cur_head = is_head
+    if cur:
+        segs.append((cur_head, cur))
+
+    out = []
+    for is_head, group in segs:
+        text = _clean_block_text("\n".join(r["text"] for r in group))
+        if not text:
+            continue
+        size = Counter(
+            {s: sum(len(r["text"]) for r in group if r["size"] == s)
+             for s in {r["size"] for r in group}}
+        ).most_common(1)[0][0]
+        out.append({
+            "text": text,
+            "size": size,
+            "bold": sum(r["bold"] for r in group) / len(group) > 0.5,
+            "is_heading": is_head,
+        })
+    return out
 
 
 def _drop_repeated_furniture(raw, n_pages):
@@ -265,11 +372,21 @@ def _is_prose(text: str) -> bool:
 
 
 def _is_reference_entry(text: str) -> bool:
-    """Bibliography entries that escaped section-level removal: dense with
-    author initials ("A. B.") plus volume/page-range numerics."""
-    initials = len(re.findall(r"\b[A-Z]\.", text))
-    ranges = len(re.findall(r"\d+,\s*\d+\s*[-–]\s*\d+", text))
-    return initials >= 3 and (ranges >= 1 or initials >= 6)
+    """Bibliography entries that escaped section-level removal."""
+    t = text.strip()
+    initials = len(re.findall(r"\b[A-Z]\.", t))
+    ranges = len(re.findall(r"\d+,\s*\d+\s*[-–]\s*\d+", t))
+    if initials >= 3 and (ranges >= 1 or initials >= 6):
+        return True
+    # numbered entry: "12. Herff, C. et al. …" / "12  Herff, C. et al …"
+    if re.match(r"^\d{1,3}[.\s]\s*[A-Z]", t) and (
+        "et al" in t or initials >= 2 or re.search(r"\b(19|20)\d{2}\b", t)
+    ):
+        return True
+    # single-author numbered entry: "31. Mermelstein, P. Articulatory …"
+    if re.match(r"^\d{1,3}[.\s]\s*[A-Z][A-Za-z’'-]+,\s+[A-Z]\.", t):
+        return True
+    return False
 
 
 def _drop_non_prose(raw, body_size):
@@ -278,13 +395,18 @@ def _drop_non_prose(raw, body_size):
     kept = []
     dropped = 0
     for b in raw:
+        t = b["text"].strip()
+        # journal masthead / article-type label (page-1 furniture)
+        is_furniture = t.lower() in ARTICLE_LABELS or (
+            b["page"] == 0 and t.islower() and len(t) < 40
+        )
         # footnotes run ~2pt below body; abstracts only ~1pt (keep those)
         is_footnote = b["size"] <= body_size - 1.6
-        heading_like = SECTION_RE.match(b["text"]) or (
-            NUMBERED_HEADING_RE.match(b["text"]) and len(b["text"]) < 80
+        heading_like = b.get("is_heading") or SECTION_RE.match(t) or (
+            NUMBERED_HEADING_RE.match(t) and len(t) < 80
         )
-        if is_footnote or _is_reference_entry(b["text"]) or not (
-            _is_prose(b["text"]) or heading_like
+        if is_furniture or is_footnote or _is_reference_entry(t) or not (
+            _is_prose(t) or heading_like
         ):
             dropped += 1
             continue
@@ -304,16 +426,18 @@ def _classify(raw, body_size):
     for b in raw:
         text, size = b["text"], b["size"]
         if (b["page"] == 0 and title_size > body_size * 1.2
-                and size >= title_size - 0.5 and b["y0"] < 350):
+                and size >= title_size - 0.5 and b["y0"] < 350
+                and not b.get("is_heading_forced_paragraph")):
             btype = "title"
+        elif b.get("is_heading") and len(text) < 120:
+            # trust the line-level heading detection (handles Nature/SRL where
+            # the heading shares a block with the body paragraph)
+            btype = "heading"
         elif len(text) < 120 and not text.endswith((".", ",", ";")) and (
             size >= body_size * 1.12
             or SECTION_RE.match(text)
             or (b["bold"] and NUMBERED_HEADING_RE.match(text))
         ):
-            # NOTE: bold alone is NOT a heading -- bold inline lead-ins and
-            # split font runs ("Success" + "rate") otherwise become separate
-            # chunks and read with a false pause
             btype = "heading"
         else:
             btype = "paragraph"
