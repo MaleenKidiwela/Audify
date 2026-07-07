@@ -164,8 +164,18 @@ def _figure_table_rects(page) -> list[fitz.Rect]:
             rects.append(fitz.Rect(t.bbox))
     except Exception:
         pass
-    # vector figures: union up drawing paths, keep clusters of real size
+    # vector figures: union up drawing paths, keep clusters of real size.
+    # Require MANY paths -- a real plot has dozens of strokes (axes, ticks,
+    # data lines, markers); a decorative box/rule around text (e.g. SRL's
+    # boxed abstract) is 1-4 paths and must NOT be treated as a figure.
+    MIN_PATHS = 8
     cluster = None
+    n_paths = 0
+
+    def flush():
+        if cluster and cluster.get_area() > 12000 and n_paths >= MIN_PATHS:
+            rects.append(fitz.Rect(cluster))
+
     for d in page.get_drawings():
         r = fitz.Rect(d["rect"])
         if r.get_area() < 50 or r.width > page.rect.width * 0.95:
@@ -173,12 +183,12 @@ def _figure_table_rects(page) -> list[fitz.Rect]:
         if cluster and (cluster & r or (cluster | r).get_area()
                         < cluster.get_area() + r.get_area() + 8000):
             cluster |= r
+            n_paths += 1
         else:
-            if cluster and cluster.get_area() > 12000:
-                rects.append(fitz.Rect(cluster))
+            flush()
             cluster = r
-    if cluster and cluster.get_area() > 12000:
-        rects.append(fitz.Rect(cluster))
+            n_paths = 1
+    flush()
     return rects
 
 
